@@ -67,3 +67,16 @@ clang_output_*
 # generated systemd unit file + initscript
 init/gdnsd.service
 init/gdnsd.init
+
+# VIM Swap files
+.*.swp
+
+# debuild artifacts
+debian/.debhelper/
+debian/autoreconf.after
+debian/autoreconf.before
+debian/debhelper-build-stamp
+debian/files
+debian/gdnsd/
+debian/gdnsdctl/
+debian/tmp/

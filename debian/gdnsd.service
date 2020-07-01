@@ -10,11 +10,21 @@ WantedBy=multi-user.target
 [Service]
 Type=notify
 NotifyAccess=all
-ExecStart=/usr/sbin/gdnsd -f start
-ExecStop=/usr/sbin/gdnsd stop
+ExecStart=/usr/sbin/gdnsd -l start
+ExecStop=/usr/bin/gdnsdctl -l stop
+ExecReload=/usr/bin/gdnsdctl -l replace
+UMask=0022
+User=gdnsd
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+RuntimeDirectory=gdnsd
+RuntimeDirectoryMode=0700
 OOMScoreAdjust=-900
+Nice=-11
 
 # Stricter security environment:
+NoNewPrivileges=yes
+SecureBits=noroot noroot-locked no-setuid-fixup no-setuid-fixup-locked
 MountFlags=slave
 DevicePolicy=closed
 PrivateDevices=true

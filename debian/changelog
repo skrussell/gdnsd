@@ -1,3 +1,9 @@
+gdnsd (3.2.2-1) unstable; urgency=medium
+
+  * New major upstream release.
+
+ -- Russell Knighton <russell@samknows.com>  Mon, 22 Jun 2020 15:36:02 +0100
+
 gdnsd (2.4.2-1) unstable; urgency=medium
 
   * New upstream point release.
