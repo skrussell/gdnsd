@@ -136,7 +136,10 @@ void dnsio_udp_init(const pid_t main_pid)
 static void udp_sock_opts_v4(const gdnsd_anysin_t* sa, const int sock V_UNUSED)
 {
 #if defined IP_MTU_DISCOVER && defined IP_PMTUDISC_DONT
-    sockopt_int_fatal(UDP, sa, sock, SOL_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DONT);
+#  if defined IP_PMTUDISC_OMIT
+    if (sockopt_int_warn(UDP, sa, sock, SOL_IP, IP_MTU_DISCOVER, IP_PMTUDISC_OMIT))
+#  endif
+        sockopt_int_fatal(UDP, sa, sock, SOL_IP, IP_MTU_DISCOVER, IP_PMTUDISC_DONT);
 #elif defined IP_DONTFRAG
     sockopt_bool_fatal(UDP, sa, sock, SOL_IP, IP_DONTFRAG, 0);
 #else
@@ -181,7 +184,10 @@ static void udp_sock_opts_v6(const gdnsd_anysin_t* sa, const int sock)
 #endif
 
 #if defined IPV6_MTU_DISCOVER && defined IPV6_PMTUDISC_DONT
-    sockopt_int_fatal(UDP, sa, sock, SOL_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_DONT);
+#  if defined IPV6_PMTUDISC_OMIT
+    if (sockopt_int_warn(UDP, sa, sock, SOL_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_OMIT))
+#  endif
+        sockopt_int_fatal(UDP, sa, sock, SOL_IPV6, IPV6_MTU_DISCOVER, IPV6_PMTUDISC_DONT);
 #elif defined IPV6_DONTFRAG
     // There have been reports in https://github.com/gdnsd/gdnsd/issues/115 of
     // the IPV6_DONTFRAG setsockopt failing within the context of some
@@ -261,7 +267,7 @@ F_HOT F_NONNULL
 static void process_msg(const int fd, dnsp_ctx_t* pctx, dnspacket_stats_t* stats, const struct msghdr* msg_hdr, ssize_t recvmsg_rv)
 {
     if (unlikely(recvmsg_rv < 0)) {
-        log_err("UDP recvmsg() error: %s", logf_errno());
+        log_neterr("UDP recvmsg() error: %s", logf_errno());
         stats_own_inc(&stats->udp.recvfail);
         return;
     }
@@ -301,7 +307,7 @@ static void process_msg(const int fd, dnsp_ctx_t* pctx, dnspacket_stats_t* stats
                 if (errno == EINTR || ERRNO_WOULDBLOCK)
                     continue;
                 stats_own_inc(&stats->udp.sendfail);
-                log_err("UDP sendmsg() of %zu bytes to client %s failed: %s", iov->iov_len, logf_anysin(sa), logf_errno());
+                log_neterr("UDP sendmsg() of %zu bytes to client %s failed: %s", iov->iov_len, logf_anysin(sa), logf_errno());
             }
             break;
         }
@@ -382,7 +388,7 @@ static void process_mmsgs(const int fd, dnsp_ctx_t* pctx, dnspacket_stats_t* sta
     gdnsd_assert(mmsg_rv != 0);
     if (unlikely(mmsg_rv < 0)) {
         stats_own_inc(&stats->udp.recvfail);
-        log_err("UDP recvmmsg() error: %s", logf_errno());
+        log_neterr("UDP recvmmsg() error: %s", logf_errno());
         return;
     }
 
@@ -449,7 +455,7 @@ static void process_mmsgs(const int fd, dnsp_ctx_t* pctx, dnspacket_stats_t* sta
                 if (errno == EINTR || ERRNO_WOULDBLOCK)
                     continue; // retry same sendmmsg() call
                 stats_own_inc(&stats->udp.sendfail);
-                log_err("UDP sendmmsg() of %zu bytes to client %s failed: %s", dgptr[0].msg_hdr.msg_iov[0].iov_len, logf_anysin((const gdnsd_anysin_t*)dgptr[0].msg_hdr.msg_name), logf_errno());
+                log_neterr("UDP sendmmsg() of %zu bytes to client %s failed: %s", dgptr[0].msg_hdr.msg_iov[0].iov_len, logf_anysin((const gdnsd_anysin_t*)dgptr[0].msg_hdr.msg_name), logf_errno());
                 mmsg_rv = 1; // count as one packet "handled", so we
                 // don't re-send the erroring packet
             }

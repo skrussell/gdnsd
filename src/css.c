@@ -932,6 +932,10 @@ static void socks_import_fds(const socks_cfg_t* socks_cfg, const int* fds, const
         socks_import_fd(socks_cfg, fds[i]);
 }
 
+#ifndef SOL_TCP
+#define SOL_TCP IPPROTO_TCP
+#endif
+
 F_NONNULL F_WUNUSED
 static int make_tcp_listener_fd(const gdnsd_anysin_t* addr)
 {
@@ -1045,7 +1049,6 @@ css_t* css_new(const char* argv0, socks_cfg_t* socks_cfg, csc_t** csc_p)
         gdnsd_assert(fds_recvd > 2U);
         gdnsd_assert(sock_fd == -1);
         gdnsd_assert(lock_fd == -1);
-        // cppcheck-suppress resourceLeak // (cppcheck can't follow the logic)
         lock_fd = resp_fds[0];
         sock_fd = resp_fds[1];
         const size_t dns_fd_count = fds_recvd - 2U;

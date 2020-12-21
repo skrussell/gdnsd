@@ -1,3 +1,9 @@
+gdnsd (3.4.1-1) unstable; urgency=medium
+
+  * New minor upstream release.
+
+ -- Ben Raven <ben@samknows.com>  Mon, 21 Dec 2020 15:33:06 +0000
+
 gdnsd (3.3.0-1) unstable; urgency=medium
 
   * New minor upstream release.

@@ -113,8 +113,13 @@ struct conn {
     // These two must be adjacent, as a single send() points at them as if
     // they're one buffer.  This should be portable since uint8_t can't require
     // alignment padding after a uint16_t.
-    uint16_t pktbuf_size_hdr;
-    uint8_t pktbuf[MAX_RESPONSE_BUF];
+    union {
+        struct {
+            uint16_t pktbuf_size_hdr;
+            uint8_t pktbuf[MAX_RESPONSE_BUF];
+        };
+        uint8_t pktbuf_raw[MAX_RESPONSE_BUF + 2U];
+    };
 };
 
 static pthread_mutex_t registry_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -239,16 +244,20 @@ static void connq_destruct_conn(thread_t* thr, conn_t* conn, const bool rst, con
     ev_io* read_watcher = &conn->read_watcher;
     ev_io_stop(thr->loop, read_watcher);
     ev_check* check_watcher = &conn->check_watcher;
-    ev_check_stop(thr->loop, check_watcher);
+    if (ev_is_active(check_watcher)) {
+        ev_check_stop(thr->loop, check_watcher);
+        gdnsd_assert(thr->check_mode_conns);
+        thr->check_mode_conns--;
+    }
 
     const int fd = read_watcher->fd;
     if (rst) {
         const struct linger lin = { .l_onoff = 1, .l_linger = 0 };
         if (setsockopt(read_watcher->fd, SOL_SOCKET, SO_LINGER, &lin, sizeof(lin)))
-            log_err("setsockopt(%s, SO_LINGER, {1, 0}) failed: %s", logf_anysin(&conn->sa), logf_errno());
+            log_neterr("setsockopt(%s, SO_LINGER, {1, 0}) failed: %s", logf_anysin(&conn->sa), logf_errno());
     }
     if (close(fd))
-        log_err("close(%s) failed: %s", logf_anysin(&conn->sa), logf_errno());
+        log_neterr("close(%s) failed: %s", logf_anysin(&conn->sa), logf_errno());
 
     if (manage_queue)
         connq_pull_conn(thr, conn);
@@ -299,8 +308,8 @@ static void connq_append_new_conn(thread_t* thr, conn_t* conn)
     // (fairness between DSO and non-DSO, whether the most-idle DSO is anywhere
     // near the most-idle end of the list, etc)
     if (thr->num_conns == thr->max_clients) {
-        log_debug("TCP DNS conn from %s reset by server: killed due to thread connection load (most-idle)", logf_anysin(&thr->connq_head->sa));
         stats_own_inc(&conn->thr->stats->tcp.close_s_kill);
+        log_neterr("TCP DNS conn from %s reset by server: killed due to thread connection load (most-idle)", logf_anysin(&thr->connq_head->sa));
         connq_destruct_conn(thr, thr->connq_head, true, true);
     }
 }
@@ -346,7 +355,7 @@ static bool conn_write_packet(thread_t* thr, conn_t* conn, size_t resp_size)
     conn->pktbuf_size_hdr = htons((uint16_t)resp_size);
     const size_t resp_send_size = resp_size + 2U;
     const ev_io* readw = &conn->read_watcher;
-    const ssize_t send_rv = send(readw->fd, &conn->pktbuf_size_hdr, resp_send_size, 0);
+    const ssize_t send_rv = send(readw->fd, conn->pktbuf_raw, resp_send_size, 0);
     if (unlikely(send_rv < (ssize_t)resp_send_size)) {
         if (send_rv < 0 && !ERRNO_WOULDBLOCK)
             log_debug("TCP DNS conn from %s reset by server: failed while writing: %s", logf_anysin(&conn->sa), logf_errno());
@@ -670,6 +679,7 @@ static void conn_respond(thread_t* thr, conn_t* conn, const size_t req_size)
             ev_check_stop(thr->loop, checkw);
             gdnsd_assert(!ev_is_active(readw));
             ev_io_start(thr->loop, readw);
+            gdnsd_assert(thr->check_mode_conns);
             thr->check_mode_conns--;
         } else {
             gdnsd_assert(ev_is_active(readw));
@@ -719,39 +729,40 @@ static bool conn_do_recv(thread_t* thr, conn_t* conn)
     const size_t wanted = sizeof(conn->readbuf) - conn->readbuf_bytes;
 
     const ssize_t recvrv = recv(conn->read_watcher.fd, &conn->readbuf[conn->readbuf_bytes], wanted, 0);
-    if (recvrv < 1) {
-        if (!recvrv) { // 0 (EOF)
-            if (conn->readbuf_bytes) {
-                log_debug("TCP DNS conn from %s closed by client while reading: unexpected EOF", logf_anysin(&conn->sa));
-                stats_own_inc(&thr->stats->tcp.recvfail);
-                stats_own_inc(&thr->stats->tcp.close_s_err);
-            } else {
-                if (unlikely(thr->st == TH_SHUT)) {
-                    if (conn->dso.estab) {
-                        log_debug("TCP DNS conn from %s closed by client while shutting down after DSO RetryDelay", logf_anysin(&conn->sa));
-                        stats_own_inc(&thr->stats->tcp.close_c);
-                    } else {
-                        log_debug("TCP DNS conn from %s closed by client while shutting down after server half-close", logf_anysin(&conn->sa));
-                        stats_own_inc(&thr->stats->tcp.close_s_ok);
-                    }
-                } else {
-                    log_debug("TCP DNS conn from %s closed by client while idle (ideal close)", logf_anysin(&conn->sa));
+
+    if (recvrv == 0) { // (EOF)
+        if (conn->readbuf_bytes) {
+            log_debug("TCP DNS conn from %s closed by client while reading: unexpected EOF", logf_anysin(&conn->sa));
+            stats_own_inc(&thr->stats->tcp.recvfail);
+            stats_own_inc(&thr->stats->tcp.close_s_err);
+        } else {
+            if (unlikely(thr->st == TH_SHUT)) {
+                if (conn->dso.estab) {
+                    log_debug("TCP DNS conn from %s closed by client while shutting down after DSO RetryDelay", logf_anysin(&conn->sa));
                     stats_own_inc(&thr->stats->tcp.close_c);
+                } else {
+                    log_debug("TCP DNS conn from %s closed by client while shutting down after server half-close", logf_anysin(&conn->sa));
+                    stats_own_inc(&thr->stats->tcp.close_s_ok);
                 }
-            }
-            connq_destruct_conn(thr, conn, false, true);
-        } else { // -1 (errno)
-            if (!ERRNO_WOULDBLOCK) {
-                log_debug("TCP DNS conn from %s reset by server: error while reading: %s", logf_anysin(&conn->sa), logf_errno());
-                stats_own_inc(&thr->stats->tcp.recvfail);
-                stats_own_inc(&thr->stats->tcp.close_s_err);
-                connq_destruct_conn(thr, conn, true, true);
             } else {
-                // else it's -1 + errno=EAGAIN|EWOULDBLOCK and we just return true
+                log_debug("TCP DNS conn from %s closed by client while idle (ideal close)", logf_anysin(&conn->sa));
+                stats_own_inc(&thr->stats->tcp.close_c);
             }
+        }
+        connq_destruct_conn(thr, conn, false, true);
+        return true;
+    }
+
+    if (recvrv < 0) { // negative return -> errno
+        if (!ERRNO_WOULDBLOCK) {
+            log_debug("TCP DNS conn from %s reset by server: error while reading: %s", logf_anysin(&conn->sa), logf_errno());
+            stats_own_inc(&thr->stats->tcp.recvfail);
+            stats_own_inc(&thr->stats->tcp.close_s_err);
+            connq_destruct_conn(thr, conn, true, true);
         }
         return true;
     }
+
     size_t pktlen = (size_t)recvrv;
     gdnsd_assert(pktlen <= wanted);
     gdnsd_assert((conn->readbuf_bytes + pktlen) <= sizeof(conn->readbuf));
@@ -785,7 +796,7 @@ static void read_handler(struct ev_loop* loop V_UNUSED, ev_io* w, const int reve
         const size_t consumed = proxy_parse(&conn->sa, &conn->proxy_hdr, conn->readbuf_bytes);
         gdnsd_assert(consumed <= conn->readbuf_bytes);
         if (!consumed) {
-            log_debug("PROXY parse fail from %s, resetting connection", logf_anysin(&conn->sa));
+            log_neterr("PROXY parse fail from %s, resetting connection", logf_anysin(&conn->sa));
             stats_own_inc(&thr->stats->tcp.proxy_fail);
             stats_own_inc(&thr->stats->tcp.close_s_err);
             connq_destruct_conn(thr, conn, true, true);
@@ -812,6 +823,8 @@ static void accept_handler(struct ev_loop* loop, ev_io* w, const int revents V_U
 {
     gdnsd_assert(revents == EV_READ);
 
+    thread_t* thr = w->data;
+
     gdnsd_anysin_t sa;
     memset(&sa, 0, sizeof(sa));
     sa.len = GDNSD_ANYSIN_MAXLEN;
@@ -819,32 +832,28 @@ static void accept_handler(struct ev_loop* loop, ev_io* w, const int revents V_U
     const int sock = accept4(w->fd, &sa.sa, &sa.len, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
     if (unlikely(sock < 0)) {
-        switch (errno) {
-        case EAGAIN:
-#if EWOULDBLOCK != EAGAIN
-        case EWOULDBLOCK:
-#endif
-#ifdef ENONET
-        case ENONET:
-#endif
-        case ENETDOWN:
-#ifdef EPROTO
-        case EPROTO:
-#endif
-        case EHOSTDOWN:
-        case EHOSTUNREACH:
-        case ENETUNREACH:
-            log_debug("TCP DNS: early tcp socket death: %s", logf_errno());
-            break;
-        default:
-            log_err("TCP DNS: accept() failed: %s", logf_errno());
+        if (ERRNO_WOULDBLOCK || errno == EINTR) {
+            // Simple retryable failures, do nothing
+        } else if ((errno == ENFILE || errno == EMFILE) && thr->connq_head) {
+            // If we ran out of fds and there's an idle one we can close, try
+            // to do that, just like we do when we hit our internal limits
+            stats_own_inc(&thr->stats->tcp.acceptfail);
+            stats_own_inc(&thr->stats->tcp.close_s_kill);
+            log_neterr("TCP DNS conn from %s reset by server: attempting to"
+                       " free resources because: accept4() failed: %s",
+                       logf_anysin(&thr->connq_head->sa), logf_errno());
+            connq_destruct_conn(thr, thr->connq_head, true, true);
+        } else {
+            // For all other errnos (or E[MN]FILE without a conn to kill,
+            // because we're not actually the offending thread...), just do a
+            // ratelimited log output and bump the stat.
+            stats_own_inc(&thr->stats->tcp.acceptfail);
+            log_neterr("TCP DNS: accept4() failed: %s", logf_errno());
         }
         return;
     }
 
     log_debug("Received TCP DNS connection from %s", logf_anysin(&sa));
-
-    thread_t* thr = w->data;
 
     conn_t* conn = xcalloc(sizeof(*conn));
     memcpy(&conn->sa, &sa, sizeof(sa));
@@ -890,13 +899,17 @@ static void prep_handler(struct ev_loop* loop V_UNUSED, ev_prepare* w V_UNUSED, 
 
     ev_idle* iw = &thr->idle_watcher;
     if (thr->check_mode_conns) {
-        if (!ev_is_active(iw))
+        if (!ev_is_active(iw)) {
             ev_idle_start(thr->loop, iw);
+            ev_unref(thr->loop);
+        }
         if (thr->rcu_is_online)
             rcu_quiescent_state();
     } else {
-        if (ev_is_active(iw))
+        if (ev_is_active(iw)) {
+            ev_ref(thr->loop);
             ev_idle_stop(thr->loop, iw);
+        }
         if (thr->rcu_is_online) {
             thr->rcu_is_online = false;
             rcu_thread_offline();
